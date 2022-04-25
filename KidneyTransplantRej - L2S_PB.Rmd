@@ -1,0 +1,1530 @@
+---
+title: "Brouillon - stage L2S Paul Brousse - semaine 6"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(206)
+library(reshape2)
+library(readxl)
+library(mixOmics)
+library(GGally)
+library(ggpubr)
+library(factoextra)
+library(corrplot)
+library(dplyr)
+library(rpca)
+library(pheatmap)
+library(dendextend)
+# library(PLNmodels)
+# library(igraph)
+library(caret)
+# library(SKAT)
+library(vegan)
+library(kernInt)
+library(GUniFrac)
+library(data.tree)
+library(ape)
+library(TreeSummarizedExperiment)
+library(dendextend)
+library(phangorn)
+library(stringr)
+library(RGCCA)
+devtools::load_all("E:/Etudes/00 CentraleSupelec HORS DRIVE/L2S RGCCA Git/RGCCA/")
+library(matrixcalc)
+library(GLMMMiRKAT)
+library(mixKernel)
+library(stringr)
+library(ggplotify)
+library(grid)
+```
+
+## Load data
+
+```{r load data, echo=FALSE, include=FALSE}
+
+preprocessing <- function(path, sheet, skip = 0){
+  df = read_excel(path = path, sheet = sheet, skip = skip, col_names = FALSE)
+  df = as.data.frame(df)
+  rownames(df) = df[, 1]
+  df = df[, -1]
+  df = t(df)
+}
+
+
+# Percentage data at different level of the phylogeny
+PERCENT_TAB = vector(mode = "list", length = 7)
+PERCENT_TAB.NAMES = vector(mode = "list", length = 7)
+
+for (sheet in 3:9){
+  PERCENT_TAB[[sheet-2]] = preprocessing(path = "count_table.xlsx", sheet = sheet, skip = 2)
+  PERCENT_TAB[[sheet-2]] = as.data.frame(PERCENT_TAB[[sheet-2]])
+  PERCENT_TAB[[sheet-2]] = PERCENT_TAB[[sheet-2]][1:(NROW(PERCENT_TAB[[sheet-2]])-6), ]
+  
+  PERCENT_TAB.NAMES[[sheet-2]] = read_excel(path = "count_table.xlsx", sheet = sheet, n_max = 2, col_names = FALSE)
+  PERCENT_TAB.NAMES[[sheet-2]] = as.data.frame(PERCENT_TAB.NAMES[[sheet-2]])
+  PERCENT_TAB.NAMES[[sheet-2]] = PERCENT_TAB.NAMES[[sheet-2]][, 2:(NCOL(PERCENT_TAB.NAMES[[sheet-2]])-6)]
+  
+  rownames(PERCENT_TAB[[sheet-2]]) = PERCENT_TAB.NAMES[[sheet-2]][1, 1:NCOL(PERCENT_TAB.NAMES[[sheet-2]])]
+}
+
+SHEETNAMES = c("Phylum", "Class", "Order", "Family", "Genus", "Species", "OTUs")
+
+REJ = PERCENT_TAB.NAMES[[1]][2, 1:NCOL(PERCENT_TAB.NAMES[[1]])]
+REJ = REJ[,1:(ncol(REJ))]
+REJ = (REJ == 'Non-Rejection-SAL' | REJ == 'Non-Rejection-rIL2')
+REJ = as.data.frame(as.numeric(REJ))
+rownames(REJ) = rownames(PERCENT_TAB[[1]])
+colnames(REJ) = c("REJ")
+
+
+# Raw OTU data 
+OTU_COUNT = read_excel(path = "count_table.xlsx", sheet = 1, skip = 2, col_names = FALSE)
+OTU_COUNT = as.data.frame(OTU_COUNT)
+colnames(OTU_COUNT) = as.data.frame(read_excel(path = "count_table.xlsx", sheet = 1, n_max = 1, col_names = FALSE))
+rownames(OTU_COUNT) = OTU_COUNT[, 1]
+OTU_COUNT = OTU_COUNT[, -1]
+OTU_COUNT = OTU_COUNT[, 4:(NCOL(OTU_COUNT)-6)]
+OTU_COUNT = t(OTU_COUNT)
+
+
+#ELISA results
+ELISA = read_excel(path = "elisa_results.xlsx", range = 'A1:H71', sheet = 2)
+ELISA = as.data.frame(ELISA)
+rownames(ELISA) = ELISA[, 1]
+ELISA = ELISA[, -1]
+names(ELISA)[names(ELISA) == "Concentration CD14 (ng/mL)"] <- "CD14"
+names(ELISA)[names(ELISA) == "Concentration PGRPs (ng/mL)"] <- "PGRPs"
+ELISA = ELISA[which (rownames(ELISA) %in% rownames(PERCENT_TAB[[1]])), ]
+ELISA = ELISA[, c("CD14", "PGRPs")]
+
+
+#MERRLIN DATA
+MERRLIN = read_excel(path = "comp_retro_merrlin.xlsx", range = 'A1:F61', sheet = 1, col_names = TRUE)
+MERRLIN = as.data.frame(MERRLIN)
+rownames(MERRLIN) = MERRLIN[, 1]
+MERRLIN = MERRLIN[, -(1:2)]
+MERRLIN = MERRLIN[which (rownames(MERRLIN) %in% rownames(ELISA)), ]
+
+MERRLIN$Sexe[grep("M", MERRLIN$Sexe)] = as.numeric(0)
+MERRLIN$Sexe[grep("F", MERRLIN$Sexe)] = as.numeric(1)
+
+MERRLIN$Induction[grep("SAL", MERRLIN$Induction)] = as.numeric(0)
+MERRLIN$Induction[grep("rIL2", MERRLIN$Induction)] = as.numeric(1)
+
+MERRLIN = MERRLIN[, -2]
+MERRLIN = MERRLIN[order(as.numeric(row.names(MERRLIN))),]
+MERRLIN$Sexe = as.numeric(MERRLIN$Sexe)
+MERRLIN$Induction = as.numeric(MERRLIN$Induction)
+
+# Rejection vector, filtered
+REJ_CUT = as.data.frame(REJ[which (rownames(REJ) %in% rownames(ELISA)), ])
+rownames(REJ_CUT) = rownames(REJ)[which (rownames(REJ) %in% rownames(ELISA))]
+colnames(REJ_CUT) = c("REJ_CUT")
+```
+
+
+## PCA and Centered Log Ratio (CLR) Transformation
+
+First, PCA without CLR transformation, on every percentage data
+Patient number 446526 seemed to be an outlier, and was thus removed
+```{r}
+pca = vector(mode = "list", length = 7)
+contrib = vector(mode = "list", length = 14)
+contrib.names = vector(mode = "list", length = 14)
+
+for (sheet in 1:7){
+  fit.pca = prcomp(PERCENT_TAB[[sheet]][-which(rownames(PERCENT_TAB[[sheet]]) == "446526"), ], 
+                   scale = FALSE)
+  pca[[sheet]] = fviz_pca_ind(fit.pca, 
+                              habillage = as.factor(t(REJ[-which(rownames(PERCENT_TAB[[sheet]]) == "446526"), ])), 
+                              addEllipses = TRUE,
+                              label = "none")
+  
+  contrib[[2*sheet - 1]] =  fviz_contrib(fit.pca, 
+                                         choice="var", 
+                                         axes = 1, 
+                                         top = 7) + 
+      theme(axis.text = element_text(size = 12)) +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+      coord_flip()
+  contrib[[2*sheet]] = fviz_contrib(fit.pca,
+                                    choice="var",
+                                    axes = 2,
+                                    top = 7) + theme(axis.text = element_text(size = 12)) +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 10)) +
+      coord_flip()
+  contrib.names[[2*sheet - 1]] = contrib.names[[2*sheet]] = SHEETNAMES[[sheet]]
+  # print(fviz_pca_var(fit.pca, col.var = "contrib", gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07")))
+}
+
+# png("plots/PCA.png", width = 1000, height = 1600)
+ggarrange(plotlist = pca, labels = SHEETNAMES, ncol=2, nrow = 4, label.x = 0.8)
+# dev.off()
+
+# png("plots/contribution_to_variance.png", width = 1000, height = 1600)
+ggarrange(plotlist = contrib, labels = contrib.names, ncol = 2, nrow = 7, label.x = 0.8)
+# dev.off()
+```
+
+The centered log-ratio transform can help distinguish components in the case of compositional data, and is given by:
+$$ clr(x) := \left(\ln x_i - \frac1D \sum_{j=1}^D \ln x_j\right)_i $$
+
+With the CLR transformation, on the OTUs count:
+```{r CLR}
+
+pca = vector(mode = "list", length = 7)
+
+fit.pca = prcomp(logratio.transfo(OTU_COUNT), 
+                 scale = FALSE)
+fviz_pca_ind(fit.pca, 
+              habillage = as.factor(t(REJ)), 
+              addEllipses = TRUE,
+              label = "none")
+```
+The use of classical PCA, even with a CLR transformation does not help to find any cluster explaining rejection or non-rejection.
+
+
+
+## Hierarchical Clustering
+
+Let's try to use relevant distance measure for this hierarchical clustering. Note that we do not use UniFrac yet, therefore the phylogeny is not taken into account.
+
+The Jaccard distance between two samples $A$ and $B$ measures dissimilarity between sample sets, and is relevant for categorial data such as the count of OTUs:
+$$d_J = 1 - \frac{|A \cap B|}{|A \cup B|}$$
+
+The Kulczynski distance between two samples $A$ and $B$ is:
+$$d_K = 1-\frac{1}{2} \left( \frac{|A \cap B|}{|A|} + \frac{|A \cap B|}{|B|} \right)$$
+"The Kulczynski distance has been recommended by Hausdorf and Hennig as an alternative to the Jaccard distance, because for the analysis of biotic elements (groups of similar ranges) it is adequate that species with small distribution areas are grouped into the same biotic element as species with larger distribution areas of which they are a subset. Therefore, the distances should be small in this case."
+https://academic.oup.com/sysbio/article/55/1/170/2842929
+
+```{r}
+dmat.kulczyn = vegdist(OTU_COUNT, method = 'kulczynski')
+
+pheatmap(as.matrix(dmat.kulczyn),
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         fontsize = 6)
+
+fit.hc = hclust(dmat.kulczyn, method="ward.D2")
+dend <- as.dendrogram(fit.hc)
+groupCodes <- as.vector(t(REJ)) + 1
+colorCodes <- c('0'="green", '1'="red")
+
+# Assigning the labels of dendrogram object with new colors:
+labels_colors(dend) <- colorCodes[groupCodes][order.dendrogram(dend)]
+plot(dend)
+
+
+dmat.jaccard = vegdist(OTU_COUNT, method = 'jaccard')
+
+pheatmap(as.matrix(dmat.jaccard),
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         fontsize = 6)
+
+fit.hc = hclust(dmat.jaccard, method="ward.D2")
+dend <- as.dendrogram(fit.hc)
+groupCodes <- as.vector(t(REJ)) + 1
+colorCodes <- c('0'="green", '1'="red")
+
+# Assigning the labels of dendrogram object with new colors:
+labels_colors(dend) <- colorCodes[groupCodes][order.dendrogram(dend)]
+plot(dend)
+```
+Little to no information can be extracted from this dendrogram. The similarity between both clusterings is notable, but does not provide any more information.
+
+
+# Compute p-values 
+
+Let's compute the raw p-values with t-test.
+```{r, warning=FALSE}
+pval.vec = vector(mode = "list", length = 7)
+# padj.vec = vector(mode = list, length = 7)
+
+for (sheet in 1:7){
+  pval = apply(PERCENT_TAB[[sheet]], 2, function(x) t.test(x~as.matrix(REJ))$p.value)
+  padj = p.adjust(pval, method = "fdr") 
+  
+  pval.signif = which(pval<0.05)
+  if (length(pval.signif) == 0){pval.signif = FALSE}
+  
+  pval.vec[[sheet]] = list(pval.signif, pval[pval.signif])
+}
+pval.vec
+```
+
+Let's also compute the Wilcoxon rank-sum test.
+This test is a nonparametric test of the null hypothesis that, for randomly selected values X and Y from two populations, the probability of X being greater than Y is equal to the probability of Y being greater than X.
+```{r, warning = FALSE}
+# Wilcoxon non-parametric test
+wilc.vec = vector(mode = "list", length = 7)
+
+for (sheet in 1:7){
+  pval = apply(PERCENT_TAB[[sheet]], 2, function(x) wilcox.test(x~as.matrix(REJ))$p.value)
+  padj = p.adjust(pval, method = "fdr") 
+  
+  pval.signif = which(pval<0.05)
+  if (length(pval.signif) == 0){pval.signif = FALSE}
+  
+  wilc.vec[[sheet]] = list(pval.signif, pval[pval.signif])
+}
+
+wilc.vec
+```
+A few clusters seem to differentiate from the others. Note, however, that we are currently checking the raw p-values, and not the adjusted ones, which would be larger.
+
+Plotting the violin boxplots of the clusters that are found significant:
+```{r, warning=FALSE, error=FALSE}
+PERCENT_TAB.R = vector(mode = "list", length = 7)
+PERCENT_TAB.NR = vector(mode = "list", length = 7)
+PERCENT_TAB.R.mean = vector(mode = "list", length = 7)
+PERCENT_TAB.NR.mean = vector(mode = "list", length = 7)
+PERCENT_TAB.diff = vector(mode = "list", length = 7)
+
+boxplot.list = list()
+
+for (sheet in 1:7){
+  PERCENT_TAB.R[[sheet]]  = PERCENT_TAB[[sheet]][which (REJ=='1'), ]
+  PERCENT_TAB.NR[[sheet]] = PERCENT_TAB[[sheet]][which (REJ=='0'), ]
+  PERCENT_TAB.R.mean[[sheet]]  = colMeans(PERCENT_TAB.R[[sheet]])
+  PERCENT_TAB.NR.mean[[sheet]] = colMeans(PERCENT_TAB.NR[[sheet]])
+  PERCENT_TAB.diff[[sheet]] = PERCENT_TAB[[sheet]][wilc.vec[[sheet]][[1]]]
+
+  if (!(all(wilc.vec[[sheet]][[1]] == FALSE))){
+    for(variable in colnames(PERCENT_TAB.diff[[sheet]])){
+      dfboxplot <- ggplot(tibble(x=as.numeric(t(REJ)), y=PERCENT_TAB.diff[[sheet]][, variable]), 
+                          aes(x=x, y=y)) +
+                    geom_dotplot(binaxis=PERCENT_TAB.diff[[sheet]][, variable],
+                                 stackdir='center',
+                                 position=position_dodge(1), 
+                                 binwidth = 1/30
+                                 ) +
+                    scale_fill_manual(values=c("1"="green",
+                                               "0"="red")) +
+                    labs(title = paste(colnames(PERCENT_TAB[[sheet]][variable]),
+                                       "from",
+                                       SHEETNAMES[sheet],
+                                       "\n difference of average:",
+                                       round(abs(PERCENT_TAB.R.mean[[sheet]][variable] - PERCENT_TAB.NR.mean[[sheet]][variable]), digits = 2),
+                                       "\n p-value:",
+                                       as.numeric(round(wilc.vec[[sheet]][[2]][variable], digits = 2)),
+                                       sep = " ")) +
+                    geom_violin(aes(fill = as.factor(t(REJ))))
+      boxplot.list[[length(boxplot.list) +1]] = dfboxplot
+    }
+  }
+}
+
+# png(filename = "plots/violin_plots.png", width = 1000, height = 500 * length(boxplot.list) %/% 2)
+ggarrange(plotlist = boxplot.list, ncol=2, nrow = length(boxplot.list) %/% 2)
+# dev.off()
+```
+
+
+Correlation between significant clusters, ELISA measures, and (non-)rejection.
+```{r}
+corrplot.list = vector(mode = "list", length = 7)
+
+for (sheet in 1:7){
+  if (!(all(wilc.vec[[sheet]][[1]] == FALSE))){
+    mcor = cor(data.frame(PERCENT_TAB[[sheet]][wilc.vec[[sheet]][[1]]][which (rownames(PERCENT_TAB[[sheet]]) %in% rownames(ELISA)),], 
+                          scale(ELISA), 
+                          sapply(MERRLIN, function(x) (scale(as.numeric(x)))) ))
+    corrplot.list[[sheet]] = corrplot(mcor, type = "upper", method = "pie", tl.cex = ) + theme(label.text = element_text(size = 20))
+  }
+}
+
+ggarrange(plotlist = corrplot.list, ncol = 1, nrow = 7)
+
+#CHANGE MAX TEXT LENGTH
+```
+
+Once again, there is still no clear differentiated cluster or group
+
+
+
+# Generalised UniFrac
+
+Let's use the UniFrac measure : it takes into account the phylogeny of the bacteria we look at! 
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5025018/
+
+
+Let's build the tree.
+https://cran.r-project.org/web/packages/data.tree/vignettes/data.tree.html
+https://stackoverflow.com/questions/15343338/how-to-convert-a-data-frame-to-tree-structure-object-such-as-dendrogram
+
+
+```{r, include=FALSE}
+# If building a tree without some patients is needed:
+
+# for (patient in rownames(OTU_COUNT)) {
+#   if (!(file.exists(paste0("trees/tree_", as.numeric(patient), ".txt")))){
+#   
+#   tree.mat = read_excel(
+#     path = "count_table.xlsx",
+#     sheet = 1,
+#     range = "C2:C550",
+#     col_names = TRUE
+#   )
+#   tree.df = sapply(1:nrow(tree.mat), function(x)
+#     strsplit(tree.mat$...1[x], ";")[[1]])
+#   
+#   clusters.mat = read_excel(
+#     path = "count_table.xlsx",
+#     sheet = 1,
+#     range = "A2:A550",
+#     col_names = TRUE
+#   )
+#   clusters.df = as.data.frame(sapply(1:nrow(clusters.mat), function(x)
+#     strsplit(clusters.mat$...1[x], ";")[[1]]))
+#   
+#   tree.df = t(tree.df)
+#   colnames(tree.df) = c("Domain",
+#                         "Phylum",
+#                         "Class",
+#                         "Order",
+#                         "Family",
+#                         "Genus",
+#                         "Species")
+#   colnames(clusters.df) = c("Cluster")
+#   
+#   tree.df = data.frame(tree.df, clusters.df)
+#   
+#   otu.tab.trans = t(OTU_COUNT[which (rownames(OTU_COUNT) %in% rownames(ELISA)),])
+#   otu.tab.trans = otu.tab.trans[,-(which (colnames(otu.tab.trans) == patient))]
+#   tree.df = tree.df[-(which (rowSums(otu.tab.trans) == 0)),]
+#   
+#   ## Clean the data to build the tree
+#   count = 0
+#   
+#   for (i in 1:nrow(tree.df)) {
+#     for (j in 1:ncol(tree.df)) {
+#       if (tree.df[i, j] == 'Unknown') {
+#         tree.df[i, j] = paste('Unknown', as.character(count), sep = "")
+#         count = count + 1
+#         
+#       }
+#     }
+#   }
+#   
+#   tree.df = data.frame(lapply(tree.df, function(x) {
+#     gsub("\\(", "", x)
+#   }))
+#   tree.df = data.frame(lapply(tree.df, function(x) {
+#     gsub("\\)", "", x)
+#   }))
+#   tree.df = data.frame(lapply(tree.df, function(x) {
+#     gsub(" ", "_", x)
+#   }))
+#   tree.df = data.frame(lapply(tree.df, function(x) {
+#     gsub("\\.", "", x)
+#   }))
+#   tree.df = data.frame(lapply(tree.df, function(x) {
+#     gsub("\\[", "", x)
+#   }))
+#   tree.df = data.frame(lapply(tree.df, function(x) {
+#     gsub("\\]", "", x)
+#   }))
+#   
+#   
+#   # tree.phylo = toTree(data = tree.df, column_order = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Cluster"))
+#   
+#   # Build the tree
+#   tree.df2 = data.frame(tree.df)
+#   tree.df2$pathString = paste(
+#     tree.df$Domain,
+#     tree.df$Phylum,
+#     tree.df$Class,
+#     tree.df$Order,
+#     tree.df$Family,
+#     tree.df$Genus,
+#     tree.df$Species,
+#     tree.df$Cluster,
+#     sep = "/"
+#   )
+#   population = as.Node(tree.df2)
+#   # print(population)
+#   # class(population)
+#   
+#   # dendro = as.dendrogram(population)
+#   # hclust = as.hclust(dendro)
+#   
+#   
+#   
+#   phylo = as.phylo(population)
+#   ape::write.tree(phylo, file = paste0('trees/tree_', as.numeric(patient), '.txt'))
+#   }
+# }
+
+
+
+phylo = ape::read.tree('trees/tree.txt')
+phylo.rooted = root.phylo(phylo,
+                          outgroup = phylo$tip.label,
+                          resolve.root = TRUE)
+phylo.midpoint = midpoint(phylo)
+tree = phylo.midpoint
+
+
+# png("plots/tree.png", width = 600, height = 6000)
+plot.phylo(tree)
+# dev.off()
+```
+
+```{r}
+# Create the tree data frame, needed later for the permutations
+
+tree.mat = read_excel(
+  path = "count_table.xlsx",
+  sheet = 1,
+  range = "C2:C550",
+  col_names = TRUE
+)
+tree.df = sapply(1:nrow(tree.mat), function(x)
+  strsplit(tree.mat$...1[x], ";")[[1]])
+
+clusters.mat = read_excel(
+  path = "count_table.xlsx",
+  sheet = 1,
+  range = "A2:A550",
+  col_names = TRUE
+)
+clusters.df = as.data.frame(sapply(1:nrow(clusters.mat), function(x)
+  strsplit(clusters.mat$...1[x], ";")[[1]]))
+
+tree.df = t(tree.df)
+colnames(tree.df) = c("Domain",
+                      "Phylum",
+                      "Class",
+                      "Order",
+                      "Family",
+                      "Genus",
+                      "Species")
+colnames(clusters.df) = c("Cluster")
+
+tree.df = data.frame(tree.df, clusters.df)
+
+
+
+otu.tab.trans = t(OTU_COUNT[which (rownames(OTU_COUNT) %in% rownames(ELISA)),])
+tree.df = tree.df[-(which (rowSums(otu.tab.trans) == 0)),]
+
+# Clean the data to build the tree
+count = 0
+
+for (i in 1:nrow(tree.df)) {
+  for (j in 1:ncol(tree.df)) {
+    if (tree.df[i, j] == 'Unknown') {
+      tree.df[i, j] = paste('Unknown', as.character(count), sep = "")
+      count = count + 1
+
+      # tree.df[i, j] = paste0("Unknown", as.character(j))
+    }
+  }
+}
+
+tree.df = data.frame(lapply(tree.df, function(x) {
+  gsub("\\(", "", x)
+}))
+tree.df = data.frame(lapply(tree.df, function(x) {
+  gsub("\\)", "", x)
+}))
+tree.df = data.frame(lapply(tree.df, function(x) {
+  gsub(" ", "_", x)
+}))
+tree.df = data.frame(lapply(tree.df, function(x) {
+  gsub("\\.", "", x)
+}))
+tree.df = data.frame(lapply(tree.df, function(x) {
+  gsub("\\[", "", x)
+}))
+tree.df = data.frame(lapply(tree.df, function(x) {
+  gsub("\\]", "", x)
+}))
+
+```
+```{r}
+# Create the phylognetic tree for each level
+
+tree.list = vector(mode = "list", length = 7)
+
+for (level in 1:7) {
+  if (!(file.exists(paste0("trees/tree_", SHEETNAMES[level], ".txt")))) {
+    tree.df2 = data.frame(tree.df[, 1:(level + 1)])
+    
+    if (level == 1) {
+      tree.df2$pathString = paste(tree.df2$Domain,
+                                  tree.df2$Phylum,
+                                  sep = "/")
+    }
+    
+    if (level == 2) {
+      tree.df2$pathString = paste(tree.df2$Domain,
+                                  tree.df2$Phylum,
+                                  tree.df2$Class,
+                                  sep = "/")
+    }
+    
+    if (level == 3) {
+      tree.df2$pathString = paste(tree.df2$Domain,
+                                  tree.df2$Phylum,
+                                  tree.df2$Class,
+                                  tree.df2$Order,
+                                  sep = "/")
+    }
+    
+    if (level == 4) {
+      tree.df2$pathString = paste(tree.df2$Domain,
+                                  tree.df2$Phylum,
+                                  tree.df2$Class,
+                                  tree.df2$Order,
+                                  tree.df2$Family,
+                                  sep = "/")
+    }
+    
+    if (level == 5) {
+      tree.df2$pathString = paste(tree.df2$Domain,
+                                  tree.df2$Phylum,
+                                  tree.df2$Class,
+                                  tree.df2$Order,
+                                  tree.df2$Family,
+                                  tree.df2$Genus,
+                                  sep = "/")
+    }
+    
+    if (level == 6) {
+      tree.df2$pathString = paste(tree.df2$Domain,
+                                  tree.df2$Phylum,
+                                  tree.df2$Class,
+                                  tree.df2$Order,
+                                  tree.df2$Family,
+                                  tree.df2$Genus,
+                                  tree.df2$Species,
+                                  sep = "/")
+    }
+    
+    if (level == 7) {
+      tree.df2$pathString = paste(tree.df2$Domain,
+                                  tree.df2$Phylum,
+                                  tree.df2$Class,
+                                  tree.df2$Order,
+                                  tree.df2$Family,
+                                  tree.df2$Genus,
+                                  tree.df2$Species,
+                                  tree.df2$Cluster,
+                                  sep = "/")
+    }
+    
+    population = as.Node(tree.df2)
+    phylo = as.phylo(population)
+    ape::write.tree(phylo, file = paste0('trees/tree_', 
+                                         SHEETNAMES[level], 
+                                         '.txt'))
+    
+    phylo.rooted = root.phylo(phylo,
+                              outgroup = phylo$tip.label,
+                              resolve.root = TRUE)
+    phylo.midpoint = midpoint(phylo)
+    tree.list[[level]] = phylo.midpoint
+  }
+  else{
+    phylo = ape::read.tree(paste0('trees/tree_', 
+                                  SHEETNAMES[level], 
+                                  '.txt'))
+    
+    phylo.rooted = root.phylo(phylo,
+                              outgroup = phylo$tip.label,
+                              resolve.root = TRUE)
+    phylo.midpoint = midpoint(phylo)
+    tree.list[[level]] = phylo.midpoint
+  }
+}
+
+for (sheet in 1:7){
+  png(paste0("plots/tree_", SHEETNAMES[sheet], ".png"), 
+      width = 500 , 
+      height = floor(length(tree.list[[sheet]]$tip.label)) * 15)
+  plot.phylo(tree.list[[sheet]])
+  dev.off()
+}
+
+```
+
+
+
+Let's compare the UniFrac variants, and compare them to Bray-Curtis:
+https://github.com/ruthgrace/R_Scripts
+```{r}
+source("UniFrac.r")
+
+OTU_TAB = as.data.frame(OTU_COUNT[which(rownames(OTU_COUNT) %in% rownames(ELISA)), ])
+OTU_TAB = OTU_TAB[, -(which (colSums(OTU_TAB) == 0))]
+taxonomy <- rownames(OTU_TAB)
+
+# Sort taxa from most to least abundant
+taxaOrder <- rev(order(apply(OTU_TAB,2,sum)))
+taxonomy <- taxonomy[taxaOrder]
+OTU_TAB <- OTU_TAB[,taxaOrder]
+
+# Read metadata
+MyMetaOrdered <- rownames(OTU_TAB)
+MyMetaOrdered <- gsub("_.*$","",MyMetaOrdered)
+
+# Unweighted UniFrac separately with rarefied data
+OTU_TAB.rarefy <- rrarefy(OTU_TAB, min(apply(OTU_TAB,1,sum)))
+unifracs <- GUniFrac(OTU_TAB.rarefy, tree, alpha = c(1))$unifracs
+unweighted <- unifracs[, , "d_UW"]
+write.table(unweighted,file="output/unweighted_distance_matrix.txt",sep="\t",quote=FALSE)
+
+# Calculate wieghted and varadjusted UniFrac distance matrix 
+unifracs <- GUniFrac(OTU_TAB, tree, alpha = c(1))$unifracs
+
+weighted <- unifracs[, , "d_1"]
+write.table(weighted,file="output/weighted_distance_matrix.txt",sep="\t",quote=FALSE)
+
+varadjusted <- unifracs[, , "d_VAW"]
+write.table(varadjusted,file="output/varadjusted_distance_matrix.txt",sep="\t",quote=FALSE)
+
+# create bray curtis dist object using vegan, and turn into distance matrix
+braycurtis.vegdist <- vegdist(OTU_TAB,method="bray")
+braycurtis <- matrix(nrow=nrow(OTU_TAB),ncol=nrow(OTU_TAB))
+braycurtis[lower.tri(braycurtis)] <- braycurtis.vegdist
+diag(braycurtis) <- 0
+braycurtis.vegdist <- vegdist(OTU_TAB,method="bray",upper=TRUE)
+braycurtis[upper.tri(braycurtis)] <- braycurtis.vegdist
+write.table(braycurtis,file="output/bray_curtis_distance_matrix.txt",sep="\t",quote=FALSE)
+
+unweighted.pcoa <- pcoa(unweighted)
+weighted.pcoa <- pcoa(weighted)
+varadjusted.pcoa <- pcoa(varadjusted)
+
+braycurtis.pcoa <- list()
+braycurtis.pcoa$vectors <- cmdscale(braycurtis,k=nrow(OTU_TAB)-1,add=TRUE)$points
+rownames(braycurtis.pcoa$vectors) <- rownames(OTU_TAB)
+colnames(braycurtis.pcoa$vectors) <- paste("Axis",c(1:ncol(braycurtis.pcoa$vectors)),sep='.')
+
+# Function to get variance explained for the PCOA component labels
+getVarExplained <- function(vector) {
+	rawVarEx <- apply(vector,2,function(x) sd(x)*sd(x))
+	totalVarExplained <- sum(rawVarEx)
+	varEx <- rawVarEx/totalVarExplained
+	return(varEx)
+}
+
+
+unweighted.varEx <- getVarExplained(unweighted.pcoa$vectors)
+weighted.varEx <- getVarExplained(weighted.pcoa$vectors)
+varadjusted.varEx <- getVarExplained(varadjusted.pcoa$vectors)
+braycurtis.varEx <- getVarExplained(braycurtis.pcoa$vectors)
+
+# Get vector version of distance matrices for correlation plots below
+unweighted.vector <- unlist(unweighted[lower.tri(unweighted,diag=TRUE)])
+weighted.vector <- unlist(weighted[lower.tri(weighted,diag=TRUE)])
+varadjusted.vector <- unlist(varadjusted[lower.tri(varadjusted,diag=TRUE)])
+braycurtis.vector <- unlist(braycurtis[lower.tri(braycurtis,diag=TRUE)])
+
+# Replace abbreviations with full body site names
+taxonomyGroups <- as.factor(c("Rej", "Non-rej"))
+palette(c("blue", "red"))
+color.pcoa = as.factor(t(REJ)) #Check rejection or not
+
+# Plots
+pcoa.plotlist = vector(mode = "list", length = 8)
+
+pcoa.plotlist[[1]] = plot(unweighted.pcoa$vectors[,1],unweighted.pcoa$vectors[,2], col=color.pcoa ,main="Unweighted UniFrac\nprincipal coordinates analysis",xlab=paste("First Coordinate", round(unweighted.varEx[1],digits=3),"variance explained"),ylab=paste("Second Coordinate", round(unweighted.varEx[2],digits=3),"variance explained"),pch=19)
+legend("topright", levels(taxonomyGroups), pch=rep(19,length(taxonomyGroups)), col=palette()[1:length(taxonomyGroups)], xpd=NA, inset=c(-0.4,0))
+
+pcoa.plotlist[[2]] = plot(weighted.pcoa$vectors[,1],weighted.pcoa$vectors[,2], col=color.pcoa ,main="Weighted UniFrac\nprincipal coordinates analysis",xlab=paste("First Coordinate", round(weighted.varEx[1],digits=3),"variance explained"),ylab=paste("Second Coordinate", round(weighted.varEx[2],digits=3),"variance explained"),pch=19) 
+legend("topright", levels(taxonomyGroups), pch=rep(19,length(taxonomyGroups)), col=palette()[1:length(taxonomyGroups)], xpd=NA, inset=c(-0.4,0))
+
+pcoa.plotlist[[3]] = plot(varadjusted.pcoa$vectors[,1],varadjusted.pcoa$vectors[,2], col=color.pcoa,main="Varadjusted UniFrac\nprincipal coordinates analysis",xlab=paste("First Coordinate", round(varadjusted.varEx[1],digits=3),"variance explained"),ylab=paste("Second Coordinate", round(varadjusted.varEx[2],digits=3),"variance explained"),pch=19) 
+legend("topright", levels(taxonomyGroups), pch=rep(19,length(taxonomyGroups)), col=palette()[1:length(taxonomyGroups)], xpd=NA, inset=c(-0.4,0))
+
+pcoa.plotlist[[4]] = plot(braycurtis.pcoa$vectors[,1],braycurtis.pcoa$vectors[,2], col=color.pcoa,main="Bray Curtis Dissimilarity\nprincipal coordinates analysis",xlab=paste("First Coordinate", round(braycurtis.varEx[1],digits=3),"variance explained"),ylab=paste("Second Coordinate", round(braycurtis.varEx[2],digits=3),"variance explained"),pch=19)
+legend("topright", levels(taxonomyGroups), pch=rep(19,length(taxonomyGroups)), col=palette()[1:length(taxonomyGroups)], xpd=NA, inset=c(-0.4,0))
+
+# Correlation between different UniFrac modes
+plot(unweighted.vector,varadjusted.vector,main="Unweighted vs. varadjusted UniFrac")
+plot(weighted.vector,varadjusted.vector,main="Weighted vs. varadjusted UniFrac")
+plot(weighted.vector,braycurtis.vector,main="Unweighted vs. weighted UniFrac")
+plot(braycurtis.vector,weighted.vector,main="Bray Curtis dissimilarity vs. weighted UniFrac")
+
+
+# png(filename = "plots/pcoa_plots.png", width = 1200, height = 1000)
+# dev.off()
+
+# CONVERT TO GGPLOTS TO MAKE IT WORK
+```
+
+# GCCA approach
+
+We will now use a GCCA approch, by considering 3 blocks : OTUs, covariates, rejection/non-rejection
+
+The major change we will do compared to the usual method, will be to replace the Euclidian distance matrix by our UniFrac matrix during computation.
+
+To compute the kernel matrix, we use the formula provided in the following article:
+https://www.frontiersin.org/articles/10.3389/fgene.2019.00458/full
+
+$$ K= -\frac{1}{2} \left( \textbf{I}_N - \frac{\textbf{1}_N \textbf{1}_N^T}{N} \right) \textbf{D}^2 \left( \textbf{I}_N - \frac{\textbf{1}_N \textbf{1}_N^T}{N} \right)$$
+where $textbf{D}$ is the $N × N$ pairwise distance matrix and $\textbf{D}^2$ is its element-wise square matrix. This comes from Gower, 1966
+
+
+
+Computation of the kernelized GCCA
+```{r}
+source(file = 'theogcca.r')
+source(file = "utils.r")
+
+# OTU_TAB : 1st block
+# ELISA : 2nd block
+# MERRLIN : 3rd block
+# REJ_CUT : 4th block
+
+
+theo.gcca.configs = vector(mode = "list", length = 7) # Contains the configs for all tests
+
+D_1 = GUniFrac(OTU_TAB, tree, alpha = c(1))$unifracs[, , "d_1"]
+K_1 = dist2kern.exp2(D_1, 4)
+K_2 = dist2kern.trunc(D_1)
+K_3 = compute.kernel(OTU_TAB, kernel.func = "phylogenetic", phylogenetic.tree = tree)$kernel
+
+
+
+
+# Config
+theo.gcca.configs[[1]] = vector(mode = "list", length = 5)
+theo.gcca.configs[[1]][[1]] = list(OTU_TAB, ELISA, MERRLIN, REJ_CUT) # Block list
+theo.gcca.configs[[1]][[2]] = rbind(c(0, 1, 1, 1), 
+                                    c(1, 0, 1, 1), 
+                                    c(1, 1, 0, 1), 
+                                    c(1, 1, 1, 0)) # Link matrix
+theo.gcca.configs[[1]][[3]] = list(K_3, 0, 0, 0) # Kernels list
+theo.gcca.configs[[1]][[4]] = c(1, 0, 0, 0) # When to use kernels
+theo.gcca.configs[[1]][[5]] = "OTU, ELISA, MERRLIN and REJ all connected"
+
+
+#Config
+theo.gcca.configs[[2]] = vector(mode = "list", length = 5)
+theo.gcca.configs[[2]][[1]] = list(OTU_TAB, ELISA, REJ_CUT) # Block list
+theo.gcca.configs[[2]][[2]] = rbind(c(0, 1, 1), 
+                                    c(1, 0, 1), 
+                                    c(1, 1, 0)) # Link matrix
+theo.gcca.configs[[2]][[3]] = list(K_3, 0, 0) # Kernels list
+theo.gcca.configs[[2]][[4]] = c(1, 0, 0) # When to use kernels
+theo.gcca.configs[[2]][[5]] = "OTU, ELISA and REJ all connected"
+
+
+#Config
+theo.gcca.configs[[3]] = vector(mode = "list", length = 5)
+theo.gcca.configs[[3]][[1]] = list(OTU_TAB, ELISA, REJ_CUT) # Block list
+theo.gcca.configs[[3]][[2]] = rbind(c(0, 0, 1), 
+                                    c(0, 0, 1), 
+                                    c(1, 1, 0)) # Link matrix
+theo.gcca.configs[[3]][[3]] = list(K_3, 0, 0) # Kernels list
+theo.gcca.configs[[3]][[4]] = c(1, 0, 0) # When to use kernels
+theo.gcca.configs[[3]][[5]] = "OTU, ELISA only connected to REJ"
+
+
+#Config
+theo.gcca.configs[[4]] = vector(mode = "list", length = 5)
+theo.gcca.configs[[4]][[1]] = list(OTU_TAB, ELISA) # Block lis♠t
+theo.gcca.configs[[4]][[2]] = rbind(c(0, 1), 
+                                    c(1, 0)) # Link matrix
+theo.gcca.configs[[4]][[3]] = list(K_3, 0) # Kernels list
+theo.gcca.configs[[4]][[4]] = c(1, 0) # When to use kernels
+theo.gcca.configs[[4]][[5]] = "OTU, ELISA only connected together"
+
+
+#Config - Classical RGCCA
+theo.gcca.configs[[5]] = vector(mode = "list", length = 5)
+theo.gcca.configs[[5]][[1]] = list(OTU_TAB, ELISA, REJ_CUT) # Block list
+theo.gcca.configs[[5]][[2]] = rbind(c(0, 0, 1), 
+                                    c(0, 0, 1), 
+                                    c(1, 1, 0)) # Link matrix
+theo.gcca.configs[[5]][[3]] = list(0, 0, 0) # Kernels list
+theo.gcca.configs[[5]][[4]] = c(0, 0, 0) # When to use kernels
+theo.gcca.configs[[5]][[5]] = "OTU, ELISA only connected to REJ \n Classical RGCCA"
+
+
+# Config - Classical RGCCA
+theo.gcca.configs[[6]] = vector(mode = "list", length = 5)
+theo.gcca.configs[[6]][[1]] = list(OTU_TAB, ELISA, MERRLIN, REJ_CUT) # Block list
+theo.gcca.configs[[6]][[2]] = rbind(c(0, 0, 0, 1), 
+                                    c(0, 0, 0, 1), 
+                                    c(0, 0, 0, 1), 
+                                    c(1, 1, 1, 0)) # Link matrix
+theo.gcca.configs[[6]][[3]] = list(0, 0, 0, 0) # Kernels list
+theo.gcca.configs[[6]][[4]] = c(0, 0, 0, 0) # When to use kernels
+theo.gcca.configs[[6]][[5]] = "OTU, ELISA, MERRLIN only connected to REJ \n Classical RGCCA"
+
+
+# Config
+theo.gcca.configs[[7]] = vector(mode = "list", length = 5)
+theo.gcca.configs[[7]][[1]] = list(OTU_TAB, ELISA, MERRLIN, REJ_CUT) # Block list
+theo.gcca.configs[[7]][[2]] = rbind(c(0, 1, 1, 1), 
+                                    c(1, 0, 1, 1), 
+                                    c(1, 1, 0, 1), 
+                                    c(1, 1, 1, 0)) # Link matrix
+theo.gcca.configs[[7]][[3]] = list(0, 0, 0, 0) # Kernels list
+theo.gcca.configs[[7]][[4]] = c(0, 0, 0, 0) # When to use kernels
+theo.gcca.configs[[7]][[5]] = "OTU, ELISA, MERRLIN, REJ all connected \n Classical RGCCA"
+
+
+theo.gcca.list = vector(mode = "list", length = length(theo.gcca.configs))
+for (conf in 1:length(theo.gcca.configs)){
+  theo.gcca.list[[conf]] = theo.gcca(blocks = theo.gcca.configs[[conf]][[1]],
+                                     connection = theo.gcca.configs[[conf]][[2]],
+                                     kernel = theo.gcca.configs[[conf]][[3]],
+                                     useKernel = theo.gcca.configs[[conf]][[4]],
+                                     verbose = FALSE)
+  
+  plot(theo.gcca.list[[conf]]$Y[[1]][, 1],
+       theo.gcca.list[[conf]]$Y[[2]][, 1],
+       col = c("red", "blue")[as.matrix(REJ_CUT + 1)],
+       main = theo.gcca.configs[[conf]][[5]],
+       pch = 19)
+}
+
+
+# EXPORTER EN PNG A PREVOIR
+```
+
+# Implementing crossvalidation : LOO
+
+```{r}
+# OTU_TAB : 1st block
+# ELISA : 2nd block
+# MERRLIN : 3rd block
+# REJ_CUT : 4th block
+# tree must be loaded
+
+linkmat = rbind(c(0, 0, 1), 
+                c(0, 0, 1), 
+                c(1, 1, 0))
+counter = 0
+validation.plot = as.matrix(matrix(0, nrow = nrow(OTU_TAB), ncol = 2))
+
+
+for (patient in rownames(OTU_TAB)){
+  counter = counter+1
+  
+  OTU_TAB.cv = OTU_TAB[-which(rownames(OTU_TAB) == patient), ]
+  nullcluster = which (colSums(OTU_TAB.cv) == 0)
+  if (length(nullcluster) == 0){nullcluster = TRUE}
+  
+  OTU_TAB.cv = OTU_TAB.cv[, -nullcluster]
+  ELISA.cv = ELISA[-which(rownames(ELISA) == patient), ]
+  MERRLIN.cv = MERRLIN[-which(rownames(MERRLIN) == patient), ]
+  REJ_CUT.cv = REJ_CUT[-which(rownames(REJ_CUT) == patient), ]
+  
+  A = list(OTU_TAB.cv, ELISA.cv, REJ_CUT.cv)
+  
+  K_1.train = K_1[-which(rownames(OTU_TAB) == patient), -which(rownames(OTU_TAB) == patient)]
+  K_1.test = K_1[-which(rownames(OTU_TAB) == patient), which(rownames(OTU_TAB) == patient)]
+  # K_1.test = center.test(K_1.test, K_1.train)
+  # K_1.test = as.matrix(K_1.test - colMeans(as.matrix(K_1.test)))
+  
+  
+  ELISA.test = (ELISA[which(rownames(ELISA) == patient), ] - colMeans(ELISA.cv)) / lapply(ELISA.cv, function(x) sd(x))
+  MERRLIN.test = (MERRLIN[which(rownames(MERRLIN) == patient), ] - colMeans(MERRLIN.cv)) / lapply(MERRLIN.cv, function(x) sd(x))
+
+  K = list(K_1.train, 0, 0)
+  useKernel = c(1, 0, 0)
+  
+  thgcca.cv = theo.gcca(A,
+                           connection = linkmat,
+                           useKernel = useKernel,
+                           kernel = K,
+                           verbose = FALSE,
+                           ncomp = c(1, 1, 1)
+  )
+  
+
+  train.1 = thgcca.cv$Y[[1]][, 1]
+  validation.1 = K_1.test %*% thgcca.cv$a[[1]][, 1]
+  train.2 = thgcca.cv$Y[[2]][, 1]
+  validation.2 = as.matrix(ELISA.test) %*% thgcca.cv$a[[2]][, 1]
+  
+  axis.1 = c(as.vector(train.1), validation.1)
+  axis.2 = c(as.vector(train.2), validation.2)
+
+  
+  pointsize = rep(1, 58)
+  pointsize[58] = 2
+
+  pointcolor = c(REJ_CUT.cv, REJ_CUT[patient, ])
+
+plot(axis.1, axis.2, 
+     col = c("red", "blue")[pointcolor + 1], 
+     pch = c(1, 19)[pointsize],
+     main = paste("OTUs and ELISA only connected to REJ \n First of OTU and first of ELISA Without patient number",
+                  patient))
+
+  validation.plot[counter, 1] = validation.1
+  validation.plot[counter, 2] = validation.2
+  
+}
+
+plot(validation.plot[, 1], validation.plot[, 2], 
+     col = c("red", "blue")[as.matrix(REJ_CUT + 1)],
+     pch = 19,
+     main = "OTUs and ELISA only connected to REJ \n First of OTU and first of covariates - Leave One Out crossvalidation plot")
+```
+
+```{r}
+# OTU_TAB : 1st block
+# ELISA : 2nd block
+# MERRLIN : 3rd block
+# REJ_CUT : 4th block
+# tree must be loaded
+
+linkmat = rbind(c(0, 0, 1), 
+                c(0, 0, 1), 
+                c(1, 1, 0))
+counter = 0
+validation.plot = as.matrix(matrix(0, nrow = nrow(OTU_TAB), ncol = 2))
+
+
+for (patient in rownames(OTU_TAB)){
+  counter = counter+1
+  
+  OTU_TAB.cv = OTU_TAB[-which(rownames(OTU_TAB) == patient), ]
+  nullcluster = which (colSums(OTU_TAB.cv) == 0)
+  if (length(nullcluster) == 0){nullcluster = TRUE}
+  
+  OTU_TAB.cv = OTU_TAB.cv[, -nullcluster]
+  ELISA.cv = ELISA[-which(rownames(ELISA) == patient), ]
+  MERRLIN.cv = MERRLIN[-which(rownames(MERRLIN) == patient), ]
+  REJ_CUT.cv = REJ_CUT[-which(rownames(REJ_CUT) == patient), ]
+  
+  A = list(OTU_TAB.cv, ELISA.cv, REJ_CUT.cv)
+
+  OTU_TAB.test = (OTU_TAB[which(rownames(OTU_TAB) == patient), -nullcluster] - colMeans(OTU_TAB.cv)) / lapply(OTU_TAB.cv, function(x) sd(x))
+  ELISA.test = (ELISA[which(rownames(ELISA) == patient), ] - colMeans(as.matrix(ELISA.cv))) / apply(as.matrix(ELISA.cv), 2, function(x) sd(x))
+  MERRLIN.test = (MERRLIN[which(rownames(MERRLIN) == patient), ] - colMeans(MERRLIN.cv)) / lapply(MERRLIN.cv, function(x) sd(x))
+  
+
+  thgcca.cv = rgcca(A,
+                    connection = linkmat,
+                    verbose = FALSE,
+                    ncomp = c(1, 1, 1)
+  )
+  
+
+  train.1 = thgcca.cv$Y[[1]][, 1]
+  validation.1 = as.matrix(OTU_TAB.test) %*% thgcca.cv$a[[1]][, 1]
+  train.2 = thgcca.cv$Y[[2]][, 1]
+  validation.2 = as.matrix(ELISA.test) %*% thgcca.cv$a[[2]][, 1]
+  
+  axis.1 = c(as.vector(train.1), as.vector(validation.1))
+  axis.2 = c(as.vector(train.2), as.vector(validation.2))
+
+
+  validation.plot[counter, 1] = validation.1
+  validation.plot[counter, 2] = validation.2
+  
+}
+
+plot(validation.plot[, 1], validation.plot[, 2], 
+     col = c("red", "blue")[as.matrix(REJ_CUT + 1)],
+     pch = 19,
+     main = "OTUs and ELISA only connected to REJ \n First of OTU and first of covariates - Leave One Out crossvalidation plot \n Classical RGCCA")
+```
+
+
+
+https://rdrr.io/github/hk1785/GLMM-MiRKAT/man/Kernels.html
+
+```{r}
+distance.list = list(GUniFrac(OTU_TAB, tree, alpha = c(1))$unifracs[, , "d_1"],
+                     GUniFrac(OTU_TAB, tree, alpha = c(0.6))$unifracs[, , "d_0.6"],
+                     dist2kern.exp2(GUniFrac(OTU_TAB, tree, alpha = c(1))$unifracs[, , "d_1"], 4),
+                     dist2kern.trunc(GUniFrac(OTU_TAB, tree, alpha = c(0.6))$unifracs[, , "d_0.6"]),
+                     compute.kernel(OTU_TAB, kernel.func = "phylogenetic", phylogenetic.tree = tree)$kernel)
+
+distance.plots = vector(mode = "list", length = length(distance.list))
+counter = 0
+
+for (dmat in distance.list){
+  counter = counter + 1
+  distance.plots[[counter]] = vector(mode = "list", length = 3)
+  
+  rownames(dmat) = colnames(dmat) = rownames(OTU_TAB)
+  distance.plots[[counter]][[1]] = pheatmap(dmat, cluster_rows = TRUE, cluster_cols = TRUE, fontsize = 6)
+  
+  fit.hc = hclust(as.dist(dmat), method="ward.D2")
+  dend <- as.dendrogram(fit.hc)
+  groupCodes <- as.matrix(REJ + 1)
+  colorCodes <- c('0'="green", '1'="red")
+  labels_colors(dend) <- colorCodes[groupCodes][order.dendrogram(dend)]
+  distance.plots[[counter]][[2]] = plot(dend)
+
+  # fit = kmeans(pcoa(dmat)$vectors[,1:2], 2)
+  # yhat = fit$cluster - 1
+  # table(as.vector(t(REJ_CUT)), yhat)
+  # distance.plots[[counter]][[3]] = fviz_cluster(fit,
+  #                                               data = weighted,
+  #                                               ellipse.type = "norm",
+  #                                               habillage = c("blue", "red")[as.matrix(REJ_CUT + 1)])
+}
+
+# 
+# Y_hat = cutree(dend, 2)
+# table(as.vector(X_3), Y_hat)
+# 
+# table(X_3, Y_hat[rownames(X_3)])
+# 
+
+for (index in 1:length(distance.list)){
+  ggarrange(plotlist = distance.plots[[index]], ncol=2, nrow=2)
+}
+
+# KMEANS CLUSTERING DOES NOT WORK BECAUSE PCOA RETURNS NULL EIGENVECTORS...
+```
+
+
+# Exploring UniFrac at different levels
+A major issue here is the presence of "Unknown" taxa, which confuses the phyloseq package... 
+```{r}
+# Building count tables at different levels by summing clusters
+COUNT_LIST = vector(mode = "list", length = 7)
+for (sheet in 1:7){
+  COUNT_LIST[[sheet]] = as.data.frame(matrix(nrow = length(rownames(OTU_TAB)),
+                                             ncol = length(unique(tree.df[, sheet+1]))))
+  colnames(COUNT_LIST[[sheet]]) = unique(tree.df[, sheet+1])[order(unique(tree.df[, sheet+1]))]
+  rownames(COUNT_LIST[[sheet]]) = rownames(OTU_TAB)
+
+  for (column in colnames(COUNT_LIST[[sheet]])){
+    row2sum = which(tree.df[, sheet+1] == column)
+    if (length(row2sum) == 1){
+      COUNT_LIST[[sheet]][, column] = OTU_TAB[, which(tree.df[, sheet+1] == column)]
+    }
+    else{
+      COUNT_LIST[[sheet]][, column] = rowSums(OTU_TAB[, which(tree.df[, sheet+1] == column)])
+    }
+  }
+}
+
+# Trees listing has already been done in tree.list
+
+
+# Building the Unifrac-based kernels
+unifrac.kern = vector(mode = "list", length = 7)
+unifrac.dist = vector(mode = "list", length = 7)
+unifrac.kernfull = vector(mode = "list", length = 7)
+for (sheet in 1:5){
+  unifrac.kern[[sheet]] = compute.kernel(COUNT_LIST[[sheet]],
+                                         kernel.func = "phylogenetic",
+                                         phylogenetic.tree = tree.list[[sheet]],
+                                         method = "wunifrac")$kernel
+  unifrac.kernfull[[sheet]] = compute.kernel(COUNT_LIST[[sheet]],
+                                             kernel.func = "phylogenetic",
+                                             phylogenetic.tree = tree.list[[sheet]],
+                                             method = "wunifrac")
+  unifrac.dist[[sheet]] = GUniFrac(COUNT_LIST[[sheet]], 
+                                   tree.list[[sheet]], 
+                                   alpha = c(1))$unifracs[, , "d_1"]
+}
+
+
+
+# Plotting heatmaps and dendrogram
+kern.plots = vector(mode = "list", length = length(unifrac.kern))
+counter = 0
+
+for (dmat in unifrac.kern){
+  if (!(is.null(dmat))){
+    counter = counter + 1
+    kern.plots[[counter]] = vector(mode = "list", length = 3)
+    
+    rownames(dmat) = colnames(dmat) = rownames(OTU_TAB)
+    dmat.colors = ifelse(REJ_CUT==1, "red", "green")
+
+    kern.plots[[counter]][[1]] = pheatmap(dmat, cluster_rows = TRUE, cluster_cols = TRUE, fontsize = 6)
+    cols = dmat.colors[order(match(rownames(dmat), 
+                                   kern.plots[[counter]][[1]]$gtable$grobs[[5]]$label)), ]
+    kern.plots[[counter]][[1]]$gtable$grobs[[5]]$gp = gpar(col = cols)
+    
+    fit.hc = hclust(as.dist(dmat), method="ward.D2")
+    dend <- as.dendrogram(fit.hc)
+    groupCodes <- as.matrix(REJ + 1)
+    colorCodes <- c('0'="green", '1'="red")
+    labels_colors(dend) <- colorCodes[groupCodes][order.dendrogram(dend)]
+    kern.plots[[counter]][[2]] = plot(dend)
+  }
+}
+
+
+# Metakernel analysis
+meta.kernel = combine.kernels(phylum = unifrac.kernfull[[1]],
+                              class = unifrac.kernfull[[2]],
+                              order = unifrac.kernfull[[3]],
+                              family = unifrac.kernfull[[4]], 
+                              genus = unifrac.kernfull[[5]], 
+                              otus = compute.kernel(OTU_TAB, kernel.func = "phylogenetic", phylogenetic.tree = tree, method = "wunifrac"),
+                              method = "STATIS-UMKL")
+
+cim.kernel(phylum = unifrac.kernfull[[1]],
+                    class = unifrac.kernfull[[2]],
+                    order = unifrac.kernfull[[3]],
+                    family = unifrac.kernfull[[4]], 
+                    genus = unifrac.kernfull[[5]], 
+                    otus = compute.kernel(OTU_TAB, kernel.func = "phylogenetic", phylogenetic.tree = tree, method = "wunifrac"),
+                    method = "shade"
+)
+
+kernel.pca.result = kernel.pca(meta.kernel, ncomp = 10)
+
+plotIndiv(kernel.pca.result,
+          comp = c(1, 2),
+          ind.names = FALSE,
+          legend = TRUE,
+          group = as.matrix(REJ_CUT))
+          
+plot(kernel.pca.result)
+```
+
+
+```{r}
+K1 = compute.kernel(OTU_TAB, kernel.func = "phylogenetic", phylogenetic.tree = tree, method = "wunifrac")
+# K1 = compute.kernel(OTU_TAB, kernel.func = "abundance", method = "bray")
+K2 = compute.kernel(ELISA, kernel.func = "linear")
+K3 = compute.kernel(MERRLIN, kernel.func = "linear")
+K4 = compute.kernel(REJ_CUT, kernel.func = "linear")
+
+meta.kernel = combine.kernels(
+  otu = K1,
+  elisa = K2,
+  merrlin = K3,
+  rej = K4,
+  method = "STATIS-UMKL"
+)
+
+kernel.pca.result = kernel.pca(meta.kernel, ncomp = 10)
+kernel.pca.otu = kernel.pca(K1, ncomp = 4)
+
+cim.kernel(
+  otu = K1,
+  elisa = K2,
+  merrlin = K3,
+  rej = K4,
+  method = "square"
+)
+
+plotIndiv(
+  kernel.pca.result,
+  comp = c(1, 2),
+  ind.names = FALSE,
+  legend = TRUE,
+  group = as.matrix(REJ_CUT)
+)
+plotIndiv(
+  kernel.pca.otu,
+  comp = c(1, 2),
+  ind.names = FALSE,
+  legend = TRUE,
+  group = as.matrix(REJ_CUT)
+)
+
+plot(kernel.pca.result)
+
+
+fit = kmeans(kernel.pca.result$variates$X[, 1:2], 2)
+yhat = fit$cluster - 1
+table(as.matrix(REJ_CUT), yhat)
+fviz_cluster(fit, data = weighted, ellipse.type = "norm")
+
+```
+
+
+```{r}
+meta.kernel = combine.kernels(otu = unifrac.kernfull[[5]],
+                              elisa = K2,
+                              merrlin = K3,
+                              method = "STATIS-UMKL")
+
+kernel.pca.result = kernel.pca(meta.kernel, ncomp = 10)
+
+plotIndiv(kernel.pca.result,
+          comp = c(1, 2),
+          ind.names = FALSE,
+          legend = TRUE,
+          group = as.matrix(REJ_CUT))
+
+plot(kernel.pca.result)
+```
+
+
+
+# Permutation to explain variables
+
+```{r}
+meta.kernel = combine.kernels(otu = K1,
+                              # elisa = K2,
+                              # merrlin = K3,
+                              method = "STATIS-UMKL")
+
+kernel.pca.result = kernel.pca(meta.kernel, ncomp = 10)
+
+plotIndiv(kernel.pca.result,
+          comp = c(1, 2),
+          ind.names = FALSE,
+          legend = TRUE,
+          group = as.matrix(REJ_CUT))
+
+
+# perm = vector(mode = "list", length = 7)
+# kernel.permu = vector(mode = "list", length = 7)
+# for (sheet in 7:7){
+#   kernel.permu[[sheet]] = kernel.pca.permute(kernel.pca.result, 
+#                                              ncomp = 2, 
+#                                              otu = tree.df[, sheet+1],
+#                                              elisa = colnames(ELISA),
+#                                              merrlin = colnames(MERRLIN))
+#   perm[[sheet]] = plotVar.kernel.pca(kernel.permu[[sheet]], 
+#                                      ndisplay = 10, 
+#                                      ncol = 1) + 
+#                   theme(axis.text = element_text(size = 12))
+# }
+
+
+# png(paste0("plots/permu_", 7, ".png"), width = 400, height = 300)
+# perm[[7]] + theme(axis.text = element_text(size = 12))
+# dev.off()
+
+# perm2 = vector(mode = "list", length = 7)
+# for (sheet in 1:7){
+#   perm2[[sheet]] = perm[[sheet]]
+#   perm2[[sheet]][["facet"]][["params"]][["free"]][["y"]] = TRUE
+# }
+
+# png("plots/permutations_allblocks_comp2.png", width = 1200, height = 2600)
+# ggarrange(plotlist = perm, labels = SHEETNAMES, ncol = 2, nrow = 4, label.x = 0.1)
+# dev.off()
+```
+
+
+# Everything together
+```{r}
+meta.kernel = combine.kernels(phylum = unifrac.kernfull[[1]],
+                              class = unifrac.kernfull[[2]],
+                              order = unifrac.kernfull[[3]],
+                              family = unifrac.kernfull[[4]], 
+                              genus = unifrac.kernfull[[5]], 
+                              otus = K1,
+                              elisa = K2,
+                              merrlin = K3,
+                              rej = K4,
+                              method = "STATIS-UMKL")
+
+cim.kernel(phylum = unifrac.kernfull[[1]],
+                    class = unifrac.kernfull[[2]],
+                    order = unifrac.kernfull[[3]],
+                    family = unifrac.kernfull[[4]], 
+                    genus = unifrac.kernfull[[5]], 
+                    otus = K1,
+                    elisa = K2,
+                    merrlin = K3,
+                    rej = K4,
+                    method = "shade"
+)
+
+kernel.pca.result = kernel.pca(meta.kernel, ncomp = 10)
+
+plotIndiv(kernel.pca.result,
+          comp = c(1, 2),
+          ind.names = FALSE,
+          legend = TRUE,
+          group = as.matrix(REJ_CUT))
+          
+plot(kernel.pca.result)
+```
+
+
+
+
+# Trying out other data for validation purpose
+
+```{r}
+library(mixKernel)
+TARA = data("TARAoceans")
+
+phychem.kernel = compute.kernel(TARAoceans$phychem,
+                                kernel.func = "linear")
+pro.phylo.kernel = compute.kernel(TARAoceans$pro.phylo,
+                                  kernel.func = "abundance")
+pro.NOGs.kernel = compute.kernel(TARAoceans$pro.NOGs,
+                                 kernel.func = "abundance")
+
+
+meta.kernel = combine.kernels(phychem = phychem.kernel,
+                               pro.phylo = pro.phylo.kernel,
+                               pro.NOGs = pro.NOGs.kernel,
+                               method = "full-UMKL")
+
+
+kernel.pca.result = kernel.pca(meta.kernel, ncomp = 10)
+
+
+plotIndiv(kernel.pca.result,
+          comp = c(1, 2),
+          ind.names = FALSE,
+          legend = TRUE,
+          group = as.vector(TARAoceans$sample$depth))
+          
+plot(kernel.pca.result)
+```
+
+
+```{r}
+A = list(TARAoceans$phychem, TARAoceans$pro.phylo, TARAoceans$pro.NOGs)
+K = list(phychem.kernel$kernel, pro.phylo.kernel$kernel, pro.NOGs.kernel$kernel)
+useKernel = c(1, 1, 1)
+
+TARA.thgcca = theo.gcca(A, useKernel = useKernel, kernel = K,
+                   verbose = TRUE, ncomp = c(1,1,1))
+
+plot(TARA.thgcca$Y[[1]][, 1], TARA.thgcca$Y[[3]][, 1], col = heat.colors(4)[TARAoceans$sample$depth], 
+     main = "All 3 blocks connected")
+
+plot(TARA.thgcca$Y[[1]][, 1], TARA.thgcca$Y[[3]][, 1], col = heat.colors(8)[TARAoceans$sample$ocean], 
+     main = "All 3 blocks connected")
+```
+
+
+
+
+# Parafac, to mimic the metakernel in kernelized RGCCA
+```{r}
+library(multiway)
+
+mydim = c(58, 58, 2)
+Kmat <- array(c(K1$kernel,K2$kernel), dim = mydim)
+pfac = parafac(Kmat, nfac=2, nstart=1)
+pfac$Rsq
+pfac$C
+
+Khat <- fitted(pfac)
+sum((Kmat-Khat)^2)/prod(mydim)
+
+Kmeta = -as.numeric(pfac$C[1, 1]) * K1$kernel - as.numeric(pfac$C[2, 1]) * K2$kernel
+Kmeta2 = -as.numeric(pfac$C[1, 2]) * K1$kernel - as.numeric(pfac$C[2, 2]) * K2$kernel
+Ymeta = Kmeta %*% pfac$A[, 1]
+Ymeta2 = Kmeta2 %*% pfac$A[, 2]
+
+plot(Ymeta, Ymeta2, col = c("blue", "red")[as.matrix(REJ_CUT +1)])
+```
+
+```{r}
+mydim = c(58, 58, 3)
+Kmat <- array(c(
+  # unifrac.kernfull[[1]]$kernel,
+  # unifrac.kernfull[[2]]$kernel,
+  # unifrac.kernfull[[3]]$kernel,
+  # unifrac.kernfull[[4]]$kernel,
+  unifrac.kernfull[[5]]$kernel,
+  K1$kernel,
+  # K2$kernel,
+  # K3$kernel,
+  K4$kernel
+  ), 
+              dim = mydim)
+pfac = parafac(Kmat, nfac=2, nstart=1)
+pfac$Rsq
+pfac$C
+
+Khat <- fitted(pfac)
+sum((Kmat-Khat)^2)/prod(mydim)
+
+Kmeta = -as.numeric(pfac$C[1, 1]) * unifrac.kernfull[[5]]$kernel - as.numeric(pfac$C[2, 1]) * K1$kernel #- as.numeric(pfac$C[3, 1]) * K4$kernel
+Kmeta2 = -as.numeric(pfac$C[1, 2]) * unifrac.kernfull[[5]]$kernel - as.numeric(pfac$C[2, 2]) * K1$kernel #- as.numeric(pfac$C[3, 2]) * K4$kernel
+Ymeta = Kmeta %*% pfac$A[, 1]
+Ymeta2 = Kmeta2 %*% pfac$A[, 2]
+
+plot(Ymeta, Ymeta2, col = c("blue", "red")[as.matrix(REJ_CUT +1)])
+```
+
+
+# Optimal Feature Selection with InterpretableAI package
+https://docs.interpretable.ai/stable/IAI-R/installation/
+https://docs.interpretable.ai/stable/IAI-R/quickstart/ofs_classification/
+56b4db5582d55eaffffab0dc339202f67e1d93a87cc6199ac384f7e07ae52e5c
+```{r}
+library(iai)
+
+split = iai::split_data("classification", COUNT_LIST[[5]], REJ_CUT[, ], seed = 206, train_proportion = 0.9)
+train_OTU = split$train$X
+train_REJ = split$train$y
+test_OTU = split$test$X
+test_REJ = split$test$y
+
+grid = iai::grid_search(
+  iai::optimal_feature_selection_classifier(random_seed = 2),
+  sparsity = 1:100,
+)
+iai::fit(grid, train_OTU, train_REJ, validation_criterion = "auc")
+plot(grid, type = "validation")
+
+iai::variable_importance(iai::get_learner(grid))
+plot(grid, type = "importance")
+
+roc <- iai::roc_curve(grid, test_OTU, test_REJ, positive_label = 1)
+plot(roc)
+```
+Select top variables, sparsity = 10, and check for several seeds (including at the splitting!) 
+
+
+```{r}
+grid <- iai::grid_search(
+    iai::optimal_tree_classifier(
+        random_seed = 1,
+    ),
+    max_depth = 1:20,
+)
+iai::fit(grid, train_OTU, train_REJ)
+iai::get_learner(grid)
+
+iai::score(grid, train_OTU, train_REJ, criterion = "misclassification")
+iai::score(grid, test_OTU, test_REJ, criterion = "auc")
+# iai::roc_curve(grid, test_OTU, test_REJ, positive_label = 1)
+```
+
+
+```{r}
+grid <- iai::grid_search(
+    iai::optimal_tree_classifier(
+        random_seed = 200,
+        max_depth = 20,
+        hyperplane_config = list(sparsity = "all"),
+        criterion = "misclassification"
+    ),
+)
+iai::fit(grid, train_OTU, train_REJ)
+iai::get_learner(grid)
+
+iai::score(grid, test_OTU, test_REJ, criterion = "auc")
+```
+0.00003983 * Cluster_2 + 0.00009422 * Cluster_33-0.3894 * Cluster_16-0.005544 * Cluster_67 + 3580.9 * Cluster_115-0.1555 * Cluster_404-0.3606 * Cluster_405 + 145.9 * Cluster_467-0.4669 * Cluster_462
+
+0.00003983 * Cluster_2-0.03865 * Cluster_17 + 0.56 * Cluster_51 + 19.08 * Cluster_161-0.01469 * Cluster_206-0.1391 * Cluster_57-0.0005132 * Cluster_173-0.3606 * Cluster_405-0.000746 * Cluster_54-1.624 * Cluster_117
+
+
+```{r}
+grid <- iai::grid_search(
+    iai::optimal_tree_classifier(
+        random_seed = 1,
+        minbucket = 10,
+        refit_learner = iai::grid_search(
+            iai::optimal_feature_selection_classifier(),
+            sparsity = 1:3,
+        ),
+    ),
+    max_depth = 1:20,
+)
+iai::fit(grid, train_OTU, train_REJ)
+iai::get_learner(grid)
+iai::score(grid, test_OTU, test_REJ, criterion = "auc")
+```
+
