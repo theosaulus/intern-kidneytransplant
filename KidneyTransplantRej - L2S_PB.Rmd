@@ -1,5 +1,5 @@
 ---
-title: "Brouillon - stage L2S Paul Brousse - semaine 6"
+title: "Brouillon - stage L2S Paul Brousse"
 output: pdf_document
 ---
 
@@ -22,18 +22,18 @@ library(dendextend)
 library(caret)
 # library(SKAT)
 library(vegan)
-library(kernInt)
+# library(kernInt)
 library(GUniFrac)
 library(data.tree)
 library(ape)
-library(TreeSummarizedExperiment)
+# library(TreeSummarizedExperiment)
 library(dendextend)
 library(phangorn)
 library(stringr)
 library(RGCCA)
-devtools::load_all("E:/Etudes/00 CentraleSupelec HORS DRIVE/L2S RGCCA Git/RGCCA/")
+devtools::load_all("../L2S RGCCA Git/RGCCA/")
 library(matrixcalc)
-library(GLMMMiRKAT)
+# library(GLMMMiRKAT)
 library(mixKernel)
 library(stringr)
 library(ggplotify)
@@ -1526,5 +1526,15 @@ grid <- iai::grid_search(
 iai::fit(grid, train_OTU, train_REJ)
 iai::get_learner(grid)
 iai::score(grid, test_OTU, test_REJ, criterion = "auc")
+```
+
+
+t-SNE clustering - Surprisingly bad
+```{r}
+library(Rtsne)
+tsne_out <- Rtsne(X = as.matrix(OTU_TAB),
+                  perplexity = floor((nrow(OTU_TAB) - 1) / 3),
+                  dims = 2) # Run TSNE
+plot(tsne_out$Y,col=as.vector(t(REJ_CUT))+6,asp=1)
 ```
 
